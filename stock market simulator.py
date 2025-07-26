@@ -16,7 +16,6 @@ SCROLLING_VIEW_TICKS = 100
 MINIMUM_PRICE = 1e-6
 MARKET_SHOCK_CHANCE = 0.005
 MARKET_SHOCK_MAGNITUDE = 0.05
-PRICE_SENSITIVITY = 5e-7 # How much net volume imbalance affects price
 
 PLAYER_INITIAL_CASH = 50000
 
@@ -25,12 +24,10 @@ DAY_TRADER_CAPITAL_MEAN, DAY_TRADER_CAPITAL_STD = 50000, 10000
 INSTITUTIONAL_CAPITAL_MEAN, INSTITUTIONAL_CAPITAL_STD = 10000000, 2000000
 
 BEHAVIOR_PROFILES = {
-    'retail': {'order_chance': 0.1},
-    'day_trader': {'order_chance': 0.8},
-    'institutional': {'order_chance': 0.25}
+    'retail': {'order_chance': 0.1, 'market_order_pct': 0.7, 'limit_order_ttl': 50},
+    'day_trader': {'order_chance': 0.8, 'market_order_pct': 0.5, 'limit_order_ttl': 100},
+    'institutional': {'order_chance': 0.25, 'market_order_pct': 0.2, 'limit_order_ttl': 500}
 }
-
-TRADER_PERSONALITIES = ['value_investor', 'momentum_trader', 'mean_reversion', 'noise_trader']
 
 # --- Market Simulation Engine ---
 class Market:
@@ -50,16 +47,20 @@ class Market:
             self.cash = np.array([], dtype=np.float64)
             self.shares = np.array([], dtype=np.int64)
             self.order_chance = np.array([])
-            self.personality = np.array([], dtype=object)
-            self.outlook_score = np.array([])
+            self.market_order_pct = np.array([])
+            self.limit_order_ttl = np.array([], dtype=int)
+            self.personal_fair_value = np.array([])
             return
 
         self.trader_ids = np.arange(self.num_traders)
         self.cash = np.zeros(self.num_traders, dtype=np.float64)
         self.shares = np.zeros(self.num_traders, dtype=np.int64)
         self.order_chance = np.zeros(self.num_traders)
-        self.personality = np.random.choice(TRADER_PERSONALITIES, self.num_traders, p=[0.25, 0.25, 0.25, 0.25])
-        self.outlook_score = np.random.normal(0, 0.1, self.num_traders) # Start with a neutral-ish outlook
+        self.market_order_pct = np.zeros(self.num_traders)
+        self.limit_order_ttl = np.zeros(self.num_traders, dtype=int)
+        
+        # Each trader gets their own belief of the stock's value
+        self.personal_fair_value = np.random.normal(self.fundamental_value, self.fundamental_value * 0.1, self.num_traders)
 
         start_idx = 0
         for trader_type, count in trader_counts.items():
@@ -76,6 +77,8 @@ class Market:
 
             profile = BEHAVIOR_PROFILES[trader_type]
             self.order_chance[mask] = profile['order_chance']
+            self.market_order_pct[mask] = profile['market_order_pct']
+            self.limit_order_ttl[mask] = profile['limit_order_ttl']
 
     def reset(self, initial_shares):
         print("--- SIMULATION RESET ---")
@@ -129,14 +132,16 @@ class Market:
         
         profile = BEHAVIOR_PROFILES[trader_type]
         new_order_chance = np.full(count, profile['order_chance'])
-        new_personalities = np.random.choice(TRADER_PERSONALITIES, count)
-        new_outlook_scores = np.random.normal(0, 0.1, count)
+        new_market_pct = np.full(count, profile['market_order_pct'])
+        new_ttl = np.full(count, profile['limit_order_ttl'])
+        new_personal_fair_value = np.random.normal(self.fundamental_value, self.fundamental_value * 0.1, count)
 
         self.cash = np.concatenate([self.cash, new_cash]) if self.num_traders > 0 else new_cash
         self.shares = np.concatenate([self.shares, new_shares]) if self.num_traders > 0 else new_shares
         self.order_chance = np.concatenate([self.order_chance, new_order_chance]) if self.num_traders > 0 else new_order_chance
-        self.personality = np.concatenate([self.personality, new_personalities]) if self.num_traders > 0 else new_personalities
-        self.outlook_score = np.concatenate([self.outlook_score, new_outlook_scores]) if self.num_traders > 0 else new_outlook_scores
+        self.market_order_pct = np.concatenate([self.market_order_pct, new_market_pct]) if self.num_traders > 0 else new_market_pct
+        self.limit_order_ttl = np.concatenate([self.limit_order_ttl, new_ttl]) if self.num_traders > 0 else new_ttl
+        self.personal_fair_value = np.concatenate([self.personal_fair_value, new_personal_fair_value]) if self.num_traders > 0 else new_personal_fair_value
         
         self.trader_counts[trader_type] += count
         self.num_traders += count
@@ -149,9 +154,11 @@ class Market:
         self.player_shares = int(self.player_shares * factor)
         self.current_price /= factor
         self.fundamental_value /= factor
+        self.personal_fair_value /= factor
         
-        self.bids = []
-        self.asks = []
+        for order in self.bids + self.asks:
+            order['qty'] = int(order['qty'] * factor)
+            if order['price'] is not None: order['price'] /= factor
 
         self.price_history = collections.deque([p / factor for p in self.price_history], maxlen=self.price_history.maxlen)
         self.sma_history = collections.deque([s / factor for s in self.sma_history], maxlen=self.sma_history.maxlen)
@@ -163,23 +170,36 @@ class Market:
         self.player_shares = int(self.player_shares // factor)
         self.current_price *= factor
         self.fundamental_value *= factor
+        self.personal_fair_value *= factor
 
-        self.bids = []
-        self.asks = []
+        for order in self.bids + self.asks:
+            order['qty'] = int(order['qty'] // factor)
+            if order['price'] is not None: order['price'] *= factor
+        
+        self.bids = [o for o in self.bids if o['qty'] > 0]
+        self.asks = [o for o in self.asks if o['qty'] > 0]
 
         self.price_history = collections.deque([p * factor for p in self.price_history], maxlen=self.price_history.maxlen)
         self.sma_history = collections.deque([s * factor for s in self.sma_history], maxlen=self.sma_history.maxlen)
         self.sma_queue = collections.deque([q * factor for q in self.sma_queue], maxlen=SMA_PERIOD)
 
-    def place_player_order(self, side, qty):
+    def place_player_order(self, side, qty, price=None):
         if qty <= 0: return
-        order = {'id': 'player', 'qty': qty}
+        order = {'id': 'player', 'qty': qty, 'price': price}
         if side == 'buy':
-            if self.player_cash >= qty * self.current_price: self.bids.append(order)
+            required_cash = qty * (price if price is not None else self.current_price * 1.05)
+            if self.player_cash >= required_cash: self.bids.append(order)
             else: print("Player has insufficient cash for this buy order.")
         elif side == 'sell':
             if self.player_shares >= qty: self.asks.append(order)
             else: print("Player has insufficient shares for this sell order.")
+
+    def _execute_trade(self, buyer_id, seller_id, qty, price):
+        cost = qty * price
+        if buyer_id == 'player': self.player_cash -= cost; self.player_shares += qty
+        else: self.cash[buyer_id] -= cost; self.shares[buyer_id] += qty
+        if seller_id == 'player': self.player_cash += cost; self.player_shares -= qty
+        else: self.cash[seller_id] += cost; self.shares[seller_id] -= qty
     
     def _generate_trader_orders(self):
         if self.num_traders == 0: return
@@ -188,91 +208,98 @@ class Market:
         if not np.any(active_mask): return
 
         active_ids = self.trader_ids[active_mask]
+        active_beliefs = self.personal_fair_value[active_mask]
         
-        # Traders generate orders based on their outlook
-        order_qty = (self.outlook_score[active_mask] * 100).astype(np.int64)
-
+        price_belief_diff = active_beliefs - self.current_price
+        
         for i, trader_id in enumerate(active_ids):
-            quantity = order_qty[i]
+            diff = price_belief_diff[i]
+            if abs(diff) < 0.01 * self.current_price: continue # Indifference zone
+            
+            is_buy = diff > 0
+            
+            capital = self.cash[trader_id] + self.shares[trader_id] * self.current_price
+            order_size_pct = np.random.uniform(0.01, 0.05) * np.tanh(abs(diff))
+            order_capital = capital * order_size_pct
+            quantity = int(order_capital / (self.current_price + 1e-9))
             if quantity == 0: continue
-            
-            is_buy = quantity > 0
-            abs_qty = abs(quantity)
-            
+
+            is_market = np.random.rand() < self.market_order_pct[trader_id]
+            price = None
+            if not is_market:
+                limit_price = self.current_price + (diff * np.random.uniform(0.1, 0.5))
+                price = round(limit_price, 2)
+
+            order = {'id': trader_id, 'qty': quantity, 'price': price}
+            if price is not None:
+                order['expires_at'] = self.time + self.limit_order_ttl[trader_id]
+
             if is_buy:
-                if self.cash[trader_id] >= abs_qty * self.current_price:
-                    self.bids.append({'id': trader_id, 'qty': abs_qty})
-            else: # is sell
-                if self.shares[trader_id] >= abs_qty:
-                    self.asks.append({'id': trader_id, 'qty': abs_qty})
+                if self.cash[trader_id] >= order_capital: self.bids.append(order)
+            else:
+                if self.shares[trader_id] >= quantity: self.asks.append(order)
+
+    def _expire_orders(self):
+        self.bids = [o for o in self.bids if 'expires_at' not in o or o['expires_at'] > self.time]
+        self.asks = [o for o in self.asks if 'expires_at' not in o or o['expires_at'] > self.time]
 
     def _match_orders(self):
-        total_bid_volume = sum(o['qty'] for o in self.bids)
-        total_ask_volume = sum(o['qty'] for o in self.asks)
+        volume_this_tick = 0
+        market_bids = [o for o in self.bids if o['price'] is None]
+        limit_bids = sorted([o for o in self.bids if o['price'] is not None], key=lambda x: x['price'], reverse=True)
+        market_asks = [o for o in self.asks if o['price'] is None]
+        limit_asks = sorted([o for o in self.asks if o['price'] is not None], key=lambda x: x['price'])
+
+        while limit_bids and limit_asks and limit_bids[0]['price'] >= limit_asks[0]['price']:
+            bid, ask = limit_bids[0], limit_asks[0]
+            trade_price = (bid['price'] + ask['price']) / 2.0
+            trade_qty = min(bid['qty'], ask['qty'])
+            self._execute_trade(bid['id'], ask['id'], trade_qty, trade_price)
+            volume_this_tick += trade_qty
+            self.current_price = max(trade_price, MINIMUM_PRICE)
+            bid['qty'] -= trade_qty; ask['qty'] -= trade_qty
+            if bid['qty'] == 0: limit_bids.pop(0)
+            if ask['qty'] == 0: limit_asks.pop(0)
+
+        for bid in market_bids:
+            while bid['qty'] > 0 and limit_asks:
+                ask = limit_asks[0]; trade_price = ask['price']
+                trade_qty = min(bid['qty'], ask['qty'])
+                self._execute_trade(bid['id'], ask['id'], trade_qty, trade_price)
+                volume_this_tick += trade_qty
+                self.current_price = max(trade_price, MINIMUM_PRICE)
+                bid['qty'] -= trade_qty; ask['qty'] -= trade_qty
+                if ask['qty'] == 0: limit_asks.pop(0)
         
-        trade_volume = min(total_bid_volume, total_ask_volume)
+        for ask in market_asks:
+            while ask['qty'] > 0 and limit_bids:
+                bid = limit_bids[0]; trade_price = bid['price']
+                trade_qty = min(ask['qty'], bid['qty'])
+                self._execute_trade(bid['id'], ask['id'], trade_qty, trade_price)
+                volume_this_tick += trade_qty
+                self.current_price = max(trade_price, MINIMUM_PRICE)
+                ask['qty'] -= trade_qty; bid['qty'] -= trade_qty
+                if bid['qty'] == 0: limit_bids.pop(0)
+
+        self.bids = [b for b in market_bids if b['qty'] > 0] + limit_bids
+        self.asks = [a for a in market_asks if a['qty'] > 0] + limit_asks
         
-        if trade_volume > 0:
-            buy_fill_ratio = trade_volume / total_bid_volume
-            sell_fill_ratio = trade_volume / total_ask_volume
+        bid_volume = sum(o['qty'] for o in self.bids)
+        ask_volume = sum(o['qty'] for o in self.asks)
+        imbalance = bid_volume - ask_volume
+        price_nudge = (imbalance / (bid_volume + ask_volume + 1)) * self.current_price * 0.001
+        self.current_price = max(self.current_price + price_nudge, MINIMUM_PRICE)
 
-            for bid in self.bids:
-                qty_to_trade = int(bid['qty'] * buy_fill_ratio)
-                if qty_to_trade > 0:
-                    buyer_id = bid['id']
-                    cost = qty_to_trade * self.current_price
-                    if buyer_id == 'player':
-                        self.player_cash -= cost
-                        self.player_shares += qty_to_trade
-                    else:
-                        self.cash[buyer_id] -= cost
-                        self.shares[buyer_id] += qty_to_trade
-            
-            for ask in self.asks:
-                qty_to_trade = int(ask['qty'] * sell_fill_ratio)
-                if qty_to_trade > 0:
-                    seller_id = ask['id']
-                    revenue = qty_to_trade * self.current_price
-                    if seller_id == 'player':
-                        self.player_cash += revenue
-                        self.player_shares -= qty_to_trade
-                    else:
-                        self.cash[seller_id] += revenue
-                        self.shares[seller_id] -= qty_to_trade
-
-        self.bids.clear()
-        self.asks.clear()
-
-        net_volume = total_bid_volume - total_ask_volume
-        price_change = net_volume * PRICE_SENSITIVITY
-        self.current_price = max(self.current_price * (1 + price_change), MINIMUM_PRICE)
-
-        return trade_volume
+        return volume_this_tick
     
-    def _update_trader_outlooks(self):
-        if self.num_traders == 0: return
-        
-        sma = self.sma_history[-1]
-        momentum_sentiment = (self.current_price - sma) / (sma + 1e-9)
-        value_sentiment = (self.fundamental_value - self.current_price) / (self.current_price + 1e-9)
-        reversion_sentiment = (sma - self.current_price) / (self.current_price + 1e-9)
-        
-        # Update outlooks based on personality
-        personalities = self.personality
-        
-        value_mask = personalities == 'value_investor'
-        self.outlook_score[value_mask] += value_sentiment * 0.1
-        
-        momentum_mask = personalities == 'momentum_trader'
-        self.outlook_score[momentum_mask] += momentum_sentiment * 0.1
-        
-        reversion_mask = personalities == 'mean_reversion'
-        self.outlook_score[reversion_mask] += reversion_sentiment * 0.1
-        
-        # All outlooks slowly revert to neutral and have some random drift
-        self.outlook_score *= 0.99
-        self.outlook_score += np.random.normal(0, 0.01, self.num_traders)
-        self.outlook_score = np.clip(self.outlook_score, -1, 1)
+    def _update_trader_beliefs(self):
+        if self.num_traders > 0:
+            # Beliefs slowly drift towards the global fundamental value
+            self.personal_fair_value += (self.fundamental_value - self.personal_fair_value) * 0.001
+            # Beliefs are pulled towards the actual market price (confirmation bias)
+            self.personal_fair_value += (self.current_price - self.personal_fair_value) * 0.005
+            # Beliefs have a small random drift
+            self.personal_fair_value *= (1 + np.random.normal(0, 0.0001, self.num_traders))
 
     def _simulate_market_events(self):
         if np.random.rand() < MARKET_SHOCK_CHANCE:
@@ -283,8 +310,9 @@ class Market:
     def step(self):
         self.time += 1
         self.fundamental_value *= (1 + np.random.normal(0, 0.0005))
+        self._expire_orders()
         self._simulate_market_events()
-        self._update_trader_outlooks()
+        self._update_trader_beliefs()
         self._generate_trader_orders()
         volume = self._match_orders()
         self.price_history.append(self.current_price)
@@ -349,8 +377,8 @@ class SimulatorWindow(QMainWindow):
         player_layout = QFormLayout(player_group)
         self.qty_input = QLineEdit("10")
         self.price_input = QLineEdit()
-        self.price_input.setPlaceholderText("Market Order Only")
-        self.price_input.setEnabled(False)
+        self.price_input.setPlaceholderText("Limit Price")
+        self.price_input.setEnabled(True)
         buy_btn = QPushButton("Buy")
         sell_btn = QPushButton("Sell")
         buy_btn.clicked.connect(self.on_buy)
@@ -423,16 +451,18 @@ class SimulatorWindow(QMainWindow):
     def on_buy(self):
         try:
             qty = int(self.qty_input.text())
-            self.market.place_player_order('buy', qty)
+            price = float(self.price_input.text()) if self.price_input.text() else None
+            self.market.place_player_order('buy', qty, price)
         except ValueError:
-            print("Invalid quantity")
+            print("Invalid quantity or price")
 
     def on_sell(self):
         try:
             qty = int(self.qty_input.text())
-            self.market.place_player_order('sell', qty)
+            price = float(self.price_input.text()) if self.price_input.text() else None
+            self.market.place_player_order('sell', qty, price)
         except ValueError:
-            print("Invalid quantity")
+            print("Invalid quantity or price")
             
     def on_reset(self):
         try:
