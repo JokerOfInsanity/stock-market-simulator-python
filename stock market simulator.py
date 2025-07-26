@@ -12,7 +12,7 @@ import pyqtgraph as pg
 # --- Configuration ---
 INITIAL_PRICE = 100.0
 SMA_PERIOD = 20
-SCROLLING_VIEW_TICKS = 200
+SCROLLING_VIEW_TICKS = 100 # Updated as requested
 MINIMUM_PRICE = 1e-6 # A failsafe to prevent price from hitting absolute zero
 
 PLAYER_INITIAL_CASH = 50000
@@ -71,7 +71,6 @@ class Market:
             else: mean_cap, std_cap = INSTITUTIONAL_CAPITAL_MEAN, INSTITUTIONAL_CAPITAL_STD
             
             self.cash[mask] = np.random.normal(mean_cap, std_cap, count)
-            # Traders start with cash only, shares will be seeded
             self.shares[mask] = 0
 
             profile = BEHAVIOR_PROFILES[type]
@@ -117,20 +116,18 @@ class Market:
         else: mean_cap, std_cap = INSTITUTIONAL_CAPITAL_MEAN, INSTITUTIONAL_CAPITAL_STD
         
         new_cash = np.random.normal(mean_cap, std_cap, count)
-        new_shares = np.zeros(count, dtype=np.int64) # Start with no shares
+        new_shares = np.zeros(count, dtype=np.int64)
         
-        # Seed the initial share supply to the first batch of traders
         if not self.shares_seeded and self.initial_share_supply > 0:
             print(f"Seeding {self.initial_share_supply} shares to new traders...")
-            # Distribute shares proportional to their cash
             total_cash = new_cash.sum()
-            share_dist = (new_cash / total_cash * self.initial_share_supply).astype(int)
-            # Give remainder to the first trader
-            share_dist[0] += self.initial_share_supply - share_dist.sum()
-            new_shares = share_dist
+            if total_cash > 0:
+                share_dist = (new_cash / total_cash * self.initial_share_supply).astype(int)
+                share_dist[0] += self.initial_share_supply - share_dist.sum()
+                new_shares = share_dist
             self.shares_seeded = True
         
-        profile = BEHAVIOR_PROFILES[trader_type]
+        profile = BEHAVIOR_PROFILES[type]
         new_order_chance = np.full(count, profile['order_chance'])
         new_market_pct = np.full(count, profile['market_order_pct'])
         new_limit_range = np.full(count, profile['limit_range'])
@@ -154,10 +151,11 @@ class Market:
         self.player_shares *= factor
         self.current_price /= factor
         
-        for order in self.bids:
-            if order['price'] is not None: order['price'] /= factor
-        for order in self.asks:
-            if order['price'] is not None: order['price'] /= factor
+        # FIX: Adjust quantities and prices of all pending orders
+        for order in self.bids + self.asks:
+            order['qty'] *= factor
+            if order['price'] is not None:
+                order['price'] /= factor
 
         self.price_history = collections.deque([p / factor for p in self.price_history], maxlen=self.price_history.maxlen)
         self.sma_history = collections.deque([s / factor for s in self.sma_history], maxlen=self.sma_history.maxlen)
@@ -169,10 +167,15 @@ class Market:
         self.player_shares //= factor
         self.current_price *= factor
 
-        for order in self.bids:
-            if order['price'] is not None: order['price'] *= factor
-        for order in self.asks:
-            if order['price'] is not None: order['price'] *= factor
+        # FIX: Adjust quantities and prices of all pending orders
+        for order in self.bids + self.asks:
+            order['qty'] //= factor
+            if order['price'] is not None:
+                order['price'] *= factor
+        
+        # Remove orders that now have zero quantity
+        self.bids = [o for o in self.bids if o['qty'] > 0]
+        self.asks = [o for o in self.asks if o['qty'] > 0]
 
         self.price_history = collections.deque([p * factor for p in self.price_history], maxlen=self.price_history.maxlen)
         self.sma_history = collections.deque([s * factor for s in self.sma_history], maxlen=self.sma_history.maxlen)
@@ -353,6 +356,7 @@ class SimulatorWindow(QMainWindow):
         player_group = QGroupBox("Player Controls")
         info_group = QGroupBox("Market Controls")
         time_group = QGroupBox("Time Controls")
+        view_group = QGroupBox("Graph View") # Re-added
 
         # Add Traders Panel
         trader_layout = QFormLayout(trader_group)
@@ -418,10 +422,21 @@ class SimulatorWindow(QMainWindow):
         time_layout.addRow("Tick Speed:", self.speed_slider)
         time_layout.addRow(self.speed_label)
 
+        # View Panel
+        view_layout = QVBoxLayout(view_group)
+        self.view_full_radio = QRadioButton("Full")
+        self.view_scroll_radio = QRadioButton("Scrolling")
+        self.view_full_radio.setChecked(True)
+        self.view_full_radio.toggled.connect(lambda: self.on_view_change('Full'))
+        self.view_scroll_radio.toggled.connect(lambda: self.on_view_change('Scrolling'))
+        view_layout.addWidget(self.view_full_radio)
+        view_layout.addWidget(self.view_scroll_radio)
+
         controls_layout.addWidget(trader_group)
         controls_layout.addWidget(player_group)
         controls_layout.addWidget(info_group)
         controls_layout.addWidget(time_group)
+        controls_layout.addWidget(view_group)
 
         # --- Timer ---
         self.timer = QTimer()
