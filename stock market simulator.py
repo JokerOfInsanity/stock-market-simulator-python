@@ -14,7 +14,6 @@ INITIAL_PRICE = 100.0
 SMA_PERIOD = 20
 SCROLLING_VIEW_TICKS = 100
 MINIMUM_PRICE = 1e-6
-INT32_MAX = 2147483647
 MARKET_SHOCK_CHANCE = 0.005
 MARKET_SHOCK_MAGNITUDE = 0.05
 
@@ -29,8 +28,6 @@ BEHAVIOR_PROFILES = {
     'day_trader': {'order_chance': 0.8, 'market_order_pct': 0.5, 'limit_order_ttl': 100},
     'institutional': {'order_chance': 0.25, 'market_order_pct': 0.2, 'limit_order_ttl': 500}
 }
-
-TRADER_PERSONALITIES = ['value_investor', 'momentum_trader', 'mean_reversion', 'noise_trader']
 
 # --- Market Simulation Engine ---
 class Market:
@@ -52,7 +49,11 @@ class Market:
             self.order_chance = np.array([])
             self.market_order_pct = np.array([])
             self.limit_order_ttl = np.array([], dtype=int)
-            self.personality = np.array([], dtype=object)
+            # --- NEW AI Personality Traits ---
+            self.value_focus = np.array([]) # How much they care about fundamental value
+            self.momentum_focus = np.array([]) # How much they care about recent trends
+            self.noise_sensitivity = np.array([]) # How much they are affected by random noise
+            self.aggression = np.array([]) # How large their orders are
             return
 
         self.trader_ids = np.arange(self.num_traders)
@@ -61,7 +62,12 @@ class Market:
         self.order_chance = np.zeros(self.num_traders)
         self.market_order_pct = np.zeros(self.num_traders)
         self.limit_order_ttl = np.zeros(self.num_traders, dtype=int)
-        self.personality = np.random.choice(TRADER_PERSONALITIES, self.num_traders, p=[0.25, 0.25, 0.25, 0.25])
+        
+        # Initialize personality traits with random values
+        self.value_focus = np.random.rand(self.num_traders)
+        self.momentum_focus = np.random.rand(self.num_traders)
+        self.noise_sensitivity = np.random.rand(self.num_traders)
+        self.aggression = np.random.uniform(0.01, 0.1, self.num_traders)
 
         start_idx = 0
         for trader_type, count in trader_counts.items():
@@ -135,14 +141,20 @@ class Market:
         new_order_chance = np.full(count, profile['order_chance'])
         new_market_pct = np.full(count, profile['market_order_pct'])
         new_ttl = np.full(count, profile['limit_order_ttl'])
-        new_personalities = np.random.choice(TRADER_PERSONALITIES, count)
+        new_value_focus = np.random.rand(count)
+        new_momentum_focus = np.random.rand(count)
+        new_noise_sensitivity = np.random.rand(count)
+        new_aggression = np.random.uniform(0.01, 0.1, count)
 
         self.cash = np.concatenate([self.cash, new_cash]) if self.num_traders > 0 else new_cash
         self.shares = np.concatenate([self.shares, new_shares]) if self.num_traders > 0 else new_shares
         self.order_chance = np.concatenate([self.order_chance, new_order_chance]) if self.num_traders > 0 else new_order_chance
         self.market_order_pct = np.concatenate([self.market_order_pct, new_market_pct]) if self.num_traders > 0 else new_market_pct
         self.limit_order_ttl = np.concatenate([self.limit_order_ttl, new_ttl]) if self.num_traders > 0 else new_ttl
-        self.personality = np.concatenate([self.personality, new_personalities]) if self.num_traders > 0 else new_personalities
+        self.value_focus = np.concatenate([self.value_focus, new_value_focus]) if self.num_traders > 0 else new_value_focus
+        self.momentum_focus = np.concatenate([self.momentum_focus, new_momentum_focus]) if self.num_traders > 0 else new_momentum_focus
+        self.noise_sensitivity = np.concatenate([self.noise_sensitivity, new_noise_sensitivity]) if self.num_traders > 0 else new_noise_sensitivity
+        self.aggression = np.concatenate([self.aggression, new_aggression]) if self.num_traders > 0 else new_aggression
         
         self.trader_counts[trader_type] += count
         self.num_traders += count
@@ -206,50 +218,55 @@ class Market:
         sma = self.sma_history[-1]
         momentum_sentiment = (self.current_price - sma) / (sma + 1e-9)
         value_sentiment = (self.fundamental_value - self.current_price) / (self.current_price + 1e-9)
-        reversion_sentiment = (sma - self.current_price) / (self.current_price + 1e-9)
 
         rand_vals = np.random.rand(2, self.num_traders)
         active_mask = rand_vals[0] < self.order_chance
         if not np.any(active_mask): return
 
         active_ids = self.trader_ids[active_mask]
-        active_personalities = self.personality[active_mask]
-        
-        buy_prob = np.full(len(active_ids), 0.5)
+        active_cash = self.cash[active_mask]
+        active_shares = self.shares[active_mask]
+        active_value_focus = self.value_focus[active_mask]
+        active_momentum_focus = self.momentum_focus[active_mask]
+        active_noise = self.noise_sensitivity[active_mask] * np.random.normal(0, 0.1, len(active_ids))
+        active_aggression = self.aggression[active_mask]
 
-        buy_prob[active_personalities == 'value_investor'] += value_sentiment * 0.5
-        buy_prob[active_personalities == 'momentum_trader'] += momentum_sentiment * 0.5
-        buy_prob[active_personalities == 'mean_reversion'] += reversion_sentiment * 0.5
+        # Calculate a "desire" score based on personality and market signals
+        desire_score = (active_value_focus * value_sentiment) + (active_momentum_focus * momentum_sentiment) + active_noise
         
-        buy_prob = np.clip(buy_prob, 0.01, 0.99)
+        # Calculate desired position based on score and aggression
+        total_capital = active_cash + active_shares * self.current_price
+        desired_share_alloc = active_aggression * (1 + np.tanh(desire_score)) # tanh squashes score to a reasonable range
+        desired_shares = (total_capital * desired_share_alloc) / (self.current_price + 1e-9)
+        
+        # Determine order quantity needed to reach desired position
+        order_qty = (desired_shares - active_shares).astype(np.int64)
 
-        is_buy_decision = rand_vals[1, active_mask] < buy_prob
-        
         for i, trader_id in enumerate(active_ids):
-            is_buy = is_buy_decision[i]
-            
-            capital = self.cash[trader_id] + self.shares[trader_id] * self.current_price
-            order_size_pct = np.random.uniform(0.01, 0.05)
-            order_capital = capital * order_size_pct
-            quantity = int(order_capital / (self.current_price + 1e-9))
+            quantity = order_qty[i]
             if quantity == 0: continue
-
-            is_market = np.random.rand() < self.market_order_pct[trader_id]
+            
+            is_buy = quantity > 0
+            is_market = rand_vals[1, i] < self.market_order_pct[trader_id]
+            
             price = None
             if not is_market:
-                spread = (self.current_price * 1.01) - (self.current_price * 0.99)
-                if is_buy: price = self.current_price * 0.99 + np.random.uniform(0, spread/2)
-                else: price = self.current_price * 1.01 - np.random.uniform(0, spread/2)
+                spread = self.current_price * 0.01
+                if is_buy: price = self.current_price - np.random.uniform(0, spread)
+                else: price = self.current_price + np.random.uniform(0, spread)
                 price = round(price, 2)
-
-            order = {'id': trader_id, 'qty': quantity, 'price': price}
+            
+            abs_qty = abs(quantity)
+            order = {'id': trader_id, 'qty': abs_qty, 'price': price}
             if price is not None:
                 order['expires_at'] = self.time + self.limit_order_ttl[trader_id]
 
             if is_buy:
-                if self.cash[trader_id] >= order_capital: self.bids.append(order)
-            else:
-                if self.shares[trader_id] >= quantity: self.asks.append(order)
+                if self.cash[trader_id] >= abs_qty * (price or self.current_price):
+                    self.bids.append(order)
+            else: # is sell
+                if self.shares[trader_id] >= abs_qty:
+                    self.asks.append(order)
 
     def _expire_orders(self):
         self.bids = [o for o in self.bids if 'expires_at' not in o or o['expires_at'] > self.time]
@@ -397,8 +414,8 @@ class SimulatorWindow(QMainWindow):
         reset_btn.clicked.connect(self.on_reset)
         split_btn = QPushButton("Split 2:1")
         rev_split_btn = QPushButton("R-Split 1:2")
-        split_btn.clicked.connect(lambda: self.market.perform_split(2))
-        rev_split_btn.clicked.connect(lambda: self.market.perform_reverse_split(2))
+        split_btn.clicked.connect(lambda checked: self.market.perform_split(2))
+        rev_split_btn.clicked.connect(lambda checked: self.market.perform_reverse_split(2))
         self.trader_counts_label = QLabel("...")
         self.market_cap_label = QLabel("...")
         self.order_book_label = QLabel("...")
@@ -504,7 +521,6 @@ class SimulatorWindow(QMainWindow):
         player_val = self.market.player_cash + self.market.player_shares * self.market.current_price
         self.player_status_label.setText(f"Cash: ${self.market.player_cash:,.2f}\nShares: {self.market.player_shares}\nValue: ${player_val:,.2f}")
         
-        # FIX: Access trader_counts from the market object
         counts_str = "Trader Counts:\n" + "\n".join([f"  {k}: {v}" for k,v in self.market.trader_counts.items()])
         self.trader_counts_label.setText(counts_str)
         
