@@ -14,6 +14,12 @@ INITIAL_PRICE = 100.0
 SMA_PERIOD = 20
 SCROLLING_VIEW_TICKS = 200
 MINIMUM_PRICE = 1e-6 # A failsafe to prevent price from hitting absolute zero
+<<<<<<< Updated upstream
+=======
+INT32_MAX = 2147483647 # Max value for a 32-bit signed integer
+MARKET_SHOCK_CHANCE = 0.005 # Probability of a market-moving event each tick
+MARKET_SHOCK_MAGNITUDE = 0.05 # Std deviation of the shock's impact on value
+>>>>>>> Stashed changes
 
 PLAYER_INITIAL_CASH = 50000
 
@@ -48,8 +54,15 @@ class Market:
             self.shares = np.array([], dtype=np.int64)
             self.order_chance = np.array([])
             self.market_order_pct = np.array([])
+<<<<<<< Updated upstream
             self.limit_range = np.array([])
             self.strategy = np.array([])
+=======
+            self.time_horizon = np.array([])
+            self.contrarianism = np.array([])
+            self.base_aggression = np.array([])
+            self.risk_aversion = np.array([])
+>>>>>>> Stashed changes
             return
 
         self.trader_ids = np.arange(self.num_traders)
@@ -57,8 +70,16 @@ class Market:
         self.shares = np.zeros(self.num_traders, dtype=np.int64)
         self.order_chance = np.zeros(self.num_traders)
         self.market_order_pct = np.zeros(self.num_traders)
+<<<<<<< Updated upstream
         self.limit_range = np.zeros(self.num_traders)
         self.strategy = np.random.choice(STRATEGIES, self.num_traders)
+=======
+        
+        self.time_horizon = np.random.rand(self.num_traders)
+        self.contrarianism = np.random.uniform(-1, 1, self.num_traders)
+        self.base_aggression = np.random.uniform(0.01, 0.1, self.num_traders)
+        self.risk_aversion = np.random.rand(self.num_traders)
+>>>>>>> Stashed changes
 
         start_idx = 0
         for type, count in trader_counts.items():
@@ -133,6 +154,7 @@ class Market:
         profile = BEHAVIOR_PROFILES[trader_type]
         new_order_chance = np.full(count, profile['order_chance'])
         new_market_pct = np.full(count, profile['market_order_pct'])
+<<<<<<< Updated upstream
         new_limit_range = np.full(count, profile['limit_range'])
         new_strategies = np.random.choice(STRATEGIES, count)
 
@@ -142,6 +164,21 @@ class Market:
         self.market_order_pct = np.concatenate([self.market_order_pct, new_market_pct])
         self.limit_range = np.concatenate([self.limit_range, new_limit_range])
         self.strategy = np.concatenate([self.strategy, new_strategies])
+=======
+        new_time_horizon = np.random.rand(count)
+        new_contrarianism = np.random.uniform(-1, 1, count)
+        new_base_aggression = np.random.uniform(0.01, 0.1, count)
+        new_risk_aversion = np.random.rand(count)
+
+        self.cash = np.concatenate([self.cash, new_cash]) if self.num_traders > 0 else new_cash
+        self.shares = np.concatenate([self.shares, new_shares]) if self.num_traders > 0 else new_shares
+        self.order_chance = np.concatenate([self.order_chance, new_order_chance]) if self.num_traders > 0 else new_order_chance
+        self.market_order_pct = np.concatenate([self.market_order_pct, new_market_pct]) if self.num_traders > 0 else new_market_pct
+        self.time_horizon = np.concatenate([self.time_horizon, new_time_horizon]) if self.num_traders > 0 else new_time_horizon
+        self.contrarianism = np.concatenate([self.contrarianism, new_contrarianism]) if self.num_traders > 0 else new_contrarianism
+        self.base_aggression = np.concatenate([self.base_aggression, new_base_aggression]) if self.num_traders > 0 else new_base_aggression
+        self.risk_aversion = np.concatenate([self.risk_aversion, new_risk_aversion]) if self.num_traders > 0 else new_risk_aversion
+>>>>>>> Stashed changes
         
         self.trader_counts[trader_type] += count
         self.num_traders += count
@@ -222,7 +259,11 @@ class Market:
         buy_prob[active_strategies == 'contrarian'] -= market_sentiment * 0.5
         buy_prob = np.clip(buy_prob, 0.01, 0.99)
 
+<<<<<<< Updated upstream
         is_buy_decision = rand_vals[1, active_mask] < buy_prob
+=======
+        buy_score = (active_time_horizon * value_sentiment * 1.5) - ((1 - active_time_horizon) * momentum_sentiment * active_contrarian)
+>>>>>>> Stashed changes
         
         can_buy = self.cash[active_trader_ids] > self.current_price
         can_sell = self.shares[active_trader_ids] > 0
@@ -254,8 +295,19 @@ class Market:
                 if is_buy_order[i]: price = best_bid + np.random.uniform(0, spread / 2) + price_nudge
                 else: price = best_ask - np.random.uniform(0, spread / 2) + price_nudge
                 price = round(price, 2)
+<<<<<<< Updated upstream
             if is_buy_order[i]: self.bids.append({'id': trader_id, 'qty': quantity, 'price': price})
             else: self.asks.append({'id': trader_id, 'qty': quantity, 'price': price})
+=======
+            
+            abs_qty = abs(quantity)
+            if is_buy:
+                if self.cash[trader_id] >= abs_qty * (price or best_ask):
+                    self.bids.append({'id': trader_id, 'qty': abs_qty, 'price': price})
+            else: # is sell
+                if self.shares[trader_id] >= abs_qty:
+                    self.asks.append({'id': trader_id, 'qty': abs_qty, 'price': price})
+>>>>>>> Stashed changes
 
     def _match_orders(self):
         volume_this_tick = 0
@@ -305,9 +357,21 @@ class Market:
         self.current_price = max(self.current_price + price_nudge, MINIMUM_PRICE)
 
         return volume_this_tick
+    
+    def _simulate_market_events(self):
+        # NEW: Simulate random market-moving news
+        if np.random.rand() < MARKET_SHOCK_CHANCE:
+            shock = np.random.normal(0, MARKET_SHOCK_MAGNITUDE)
+            self.fundamental_value *= (1 + shock)
+            print(f"--- MARKET SHOCK: Fundamental value changed by {shock:.2%} ---")
 
     def step(self):
         self.time += 1
+<<<<<<< Updated upstream
+=======
+        self.fundamental_value *= (1 + np.random.normal(0, 0.0005)) # Slow drift
+        self._simulate_market_events() # Chance of a large jump
+>>>>>>> Stashed changes
         self._generate_trader_orders()
         volume = self._match_orders()
         self.price_history.append(self.current_price)
@@ -392,8 +456,13 @@ class SimulatorWindow(QMainWindow):
         reset_btn.clicked.connect(self.on_reset)
         split_btn = QPushButton("Split 2:1")
         rev_split_btn = QPushButton("R-Split 1:2")
+<<<<<<< Updated upstream
         split_btn.clicked.connect(self.market.perform_split)
         rev_split_btn.clicked.connect(self.market.perform_reverse_split)
+=======
+        split_btn.clicked.connect(lambda checked: self.market.perform_split(2))
+        rev_split_btn.clicked.connect(lambda checked: self.market.perform_reverse_split(2))
+>>>>>>> Stashed changes
         self.trader_counts_label = QLabel("...")
         self.market_cap_label = QLabel("...")
         self.order_book_label = QLabel("...")
