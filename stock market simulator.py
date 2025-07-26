@@ -62,7 +62,6 @@ class Market:
         self.strategy = np.random.choice(STRATEGIES, self.num_traders)
 
         start_idx = 0
-        # FIX: Changed loop variable from 'type' to 'trader_type' to avoid conflict with built-in 'type'
         for trader_type, count in trader_counts.items():
             if count == 0: continue
             end_idx = start_idx + count
@@ -85,6 +84,7 @@ class Market:
         print("--- SIMULATION RESET ---")
         self.time = 0
         self.current_price = INITIAL_PRICE
+        self.fundamental_value = INITIAL_PRICE # NEW: Add fundamental value
         self.graph_view_mode = 'Full'
         self.trader_counts = {'retail': 0, 'day_trader': 0, 'institutional': 0}
         
@@ -210,22 +210,29 @@ class Market:
         best_ask = min(limit_asks) if limit_asks else self.current_price * 1.01
         if best_bid >= best_ask: best_bid = best_ask * 0.99
         
+        # --- REVISED AI LOGIC ---
+        # 1. Get market signals
         sma = self.sma_history[-1]
-        market_sentiment = (self.current_price - sma) / (sma + 1e-9)
-        
+        momentum_sentiment = (self.current_price - sma) / (sma + 1e-9)
+        value_sentiment = (self.fundamental_value - self.current_price) / (self.current_price + 1e-9)
+
+        # 2. Determine who is active
         rand_vals = np.random.rand(3, self.num_traders)
         active_mask = rand_vals[0] < self.order_chance
         active_trader_ids = self.trader_ids[active_mask]
         if len(active_trader_ids) == 0: return
 
+        # 3. Determine buy probability based on strategy and signals
         active_strategies = self.strategy[active_mask]
+        
         buy_prob = np.full(len(active_trader_ids), 0.5)
-        buy_prob[active_strategies == 'momentum'] += market_sentiment * 0.5
-        buy_prob[active_strategies == 'contrarian'] -= market_sentiment * 0.5
+        buy_prob += value_sentiment * 0.2 # All traders are slightly value-oriented
+        buy_prob[active_strategies == 'momentum'] += momentum_sentiment * 0.3
+        buy_prob[active_strategies == 'contrarian'] -= momentum_sentiment * 0.3
         buy_prob = np.clip(buy_prob, 0.01, 0.99)
 
+        # 4. Generate orders based on final decisions
         is_buy_decision = rand_vals[1, active_mask] < buy_prob
-        
         can_buy = self.cash[active_trader_ids] > self.current_price
         can_sell = self.shares[active_trader_ids] > 0
         is_final_buy = is_buy_decision & can_buy
@@ -239,7 +246,6 @@ class Market:
         buy_trader_indices = trader_indices[is_buy_order]
         if len(buy_trader_indices) > 0:
             max_buy = (self.cash[buy_trader_indices] * 0.05) / (self.current_price + 1e-9)
-            # FIX: Clip max_buy to prevent integer overflow with very low prices
             np.clip(max_buy, 0, INT32_MAX, out=max_buy)
             order_quantities[is_buy_order] = np.random.randint(1, np.maximum(2, max_buy.astype(np.int64)))
         sell_trader_indices = trader_indices[~is_buy_order]
@@ -255,7 +261,7 @@ class Market:
             if is_market_order[i]: price = None
             else:
                 spread = best_ask - best_bid
-                price_nudge = spread * market_sentiment * 5
+                price_nudge = spread * momentum_sentiment * 5
                 if is_buy_order[i]: price = best_bid + np.random.uniform(0, spread / 2) + price_nudge
                 else: price = best_ask - np.random.uniform(0, spread / 2) + price_nudge
                 price = round(price, 2)
@@ -313,6 +319,8 @@ class Market:
 
     def step(self):
         self.time += 1
+        # NEW: Fundamental value performs a slow random walk
+        self.fundamental_value *= (1 + np.random.normal(0, 0.0005))
         self._generate_trader_orders()
         volume = self._match_orders()
         self.price_history.append(self.current_price)
