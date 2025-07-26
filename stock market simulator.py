@@ -23,9 +23,9 @@ DAY_TRADER_CAPITAL_MEAN, DAY_TRADER_CAPITAL_STD = 50000, 10000
 INSTITUTIONAL_CAPITAL_MEAN, INSTITUTIONAL_CAPITAL_STD = 10000000, 2000000
 
 BEHAVIOR_PROFILES = {
-    'retail': {'order_chance': 0.1, 'market_order_pct': 0.7, 'limit_range_factor': 1.0},
-    'day_trader': {'order_chance': 0.8, 'market_order_pct': 0.5, 'limit_range_factor': 0.5},
-    'institutional': {'order_chance': 0.25, 'market_order_pct': 0.2, 'limit_range_factor': 2.0}
+    'retail': {'order_chance': 0.1, 'market_order_pct': 0.7},
+    'day_trader': {'order_chance': 0.8, 'market_order_pct': 0.5},
+    'institutional': {'order_chance': 0.25, 'market_order_pct': 0.2}
 }
 
 # --- Market Simulation Engine ---
@@ -47,10 +47,10 @@ class Market:
             self.shares = np.array([], dtype=np.int64)
             self.order_chance = np.array([])
             self.market_order_pct = np.array([])
-            # --- NEW: Advanced AI Personality Traits ---
+            # --- Advanced AI Personality Traits ---
             self.time_horizon = np.array([]) # 0 for pure momentum, 1 for pure value
             self.contrarianism = np.array([]) # -1 for pure momentum, 1 for pure contrarian
-            self.risk_aversion = np.array([]) # Affects order size and limit range
+            self.base_aggression = np.array([]) # Base desired position size
             return
 
         self.trader_ids = np.arange(self.num_traders)
@@ -62,7 +62,7 @@ class Market:
         # Initialize personality traits with random values
         self.time_horizon = np.random.rand(self.num_traders)
         self.contrarianism = np.random.uniform(-1, 1, self.num_traders)
-        self.risk_aversion = np.random.rand(self.num_traders)
+        self.base_aggression = np.random.uniform(0.01, 0.1, self.num_traders) # Desired position as % of capital
 
         start_idx = 0
         for trader_type, count in trader_counts.items():
@@ -136,16 +136,15 @@ class Market:
         new_market_pct = np.full(count, profile['market_order_pct'])
         new_time_horizon = np.random.rand(count)
         new_contrarianism = np.random.uniform(-1, 1, count)
-        new_risk_aversion = np.random.rand(count)
+        new_base_aggression = np.random.uniform(0.01, 0.1, count)
 
-        # FIX: Handle concatenation when arrays are initially empty
         self.cash = np.concatenate([self.cash, new_cash]) if self.num_traders > 0 else new_cash
         self.shares = np.concatenate([self.shares, new_shares]) if self.num_traders > 0 else new_shares
         self.order_chance = np.concatenate([self.order_chance, new_order_chance]) if self.num_traders > 0 else new_order_chance
         self.market_order_pct = np.concatenate([self.market_order_pct, new_market_pct]) if self.num_traders > 0 else new_market_pct
         self.time_horizon = np.concatenate([self.time_horizon, new_time_horizon]) if self.num_traders > 0 else new_time_horizon
         self.contrarianism = np.concatenate([self.contrarianism, new_contrarianism]) if self.num_traders > 0 else new_contrarianism
-        self.risk_aversion = np.concatenate([self.risk_aversion, new_risk_aversion]) if self.num_traders > 0 else new_risk_aversion
+        self.base_aggression = np.concatenate([self.base_aggression, new_base_aggression]) if self.num_traders > 0 else new_base_aggression
         
         self.trader_counts[trader_type] += count
         self.num_traders += count
@@ -213,56 +212,53 @@ class Market:
         momentum_sentiment = (self.current_price - sma) / (sma + 1e-9)
         value_sentiment = (self.fundamental_value - self.current_price) / (self.current_price + 1e-9)
 
-        rand_vals = np.random.rand(3, self.num_traders)
+        rand_vals = np.random.rand(2, self.num_traders)
         active_mask = rand_vals[0] < self.order_chance
-        active_trader_ids = self.trader_ids[active_mask]
-        if len(active_trader_ids) == 0: return
+        if not np.any(active_mask): return
 
-        # --- NEW AI: Calculate buy score based on personality ---
-        active_contrarian = self.contrarianism[active_mask]
+        # --- REVISED AI: Desired Position Model ---
+        active_ids = self.trader_ids[active_mask]
+        active_cash = self.cash[active_mask]
+        active_shares = self.shares[active_mask]
         active_time_horizon = self.time_horizon[active_mask]
-        
-        # Score = (how much I care about value * value signal) - (how much I care about momentum * momentum signal * my contrarian level)
-        buy_score = (active_time_horizon * value_sentiment) - ( (1 - active_time_horizon) * momentum_sentiment * active_contrarian )
-        
-        # Convert score to a probability (0.5 is neutral)
-        buy_prob = 0.5 + (buy_score * 0.5) # Scale score to be between -0.5 and 0.5
-        buy_prob = np.clip(buy_prob, 0.01, 0.99)
+        active_contrarian = self.contrarianism[active_mask]
+        active_base_aggression = self.base_aggression[active_mask]
 
-        is_buy_decision = rand_vals[1, active_mask] < buy_prob
-        can_buy = self.cash[active_trader_ids] > self.current_price
-        can_sell = self.shares[active_trader_ids] > 0
-        is_final_buy = is_buy_decision & can_buy
-        is_final_sell = ~is_buy_decision & can_sell
-        placing_order_mask = is_final_buy | is_final_sell
-        trader_indices = active_trader_ids[placing_order_mask]
-        is_buy_order = is_final_buy[placing_order_mask]
-        if len(trader_indices) == 0: return
-
-        order_quantities = np.zeros_like(trader_indices, dtype=np.int64)
-        buy_trader_indices = trader_indices[is_buy_order]
-        if len(buy_trader_indices) > 0:
-            max_buy = (self.cash[buy_trader_indices] * 0.05) / (self.current_price + 1e-9)
-            np.clip(max_buy, 0, INT32_MAX, out=max_buy)
-            order_quantities[is_buy_order] = np.random.randint(1, np.maximum(2, max_buy.astype(np.int64)))
-        sell_trader_indices = trader_indices[~is_buy_order]
-        if len(sell_trader_indices) > 0:
-            max_sell = self.shares[sell_trader_indices] * 0.05
-            np.clip(max_sell, 0, INT32_MAX, out=max_sell)
-            order_quantities[~is_buy_order] = np.random.randint(1, np.maximum(2, max_sell.astype(np.int64)))
+        # Calculate a score based on personality and market signals
+        buy_score = (active_time_horizon * value_sentiment) - ((1 - active_time_horizon) * momentum_sentiment * active_contrarian)
         
-        is_market_order = rand_vals[2, trader_indices] < self.market_order_pct[trader_indices]
-        for i, trader_id in enumerate(trader_indices):
-            quantity = order_quantities[i]
+        # Calculate desired position based on score and aggression
+        total_capital = active_cash + active_shares * self.current_price
+        desired_share_alloc = active_base_aggression * (1 + buy_score)
+        desired_shares = (total_capital * desired_share_alloc) / (self.current_price + 1e-9)
+        
+        # Determine order quantity needed to reach desired position
+        order_qty = (desired_shares - active_shares).astype(np.int64)
+
+        for i, trader_id in enumerate(active_ids):
+            quantity = order_qty[i]
             if quantity == 0: continue
-            if is_market_order[i]: price = None
+            
+            is_buy = quantity > 0
+            is_market = rand_vals[1, i] < self.market_order_pct[trader_id]
+            
+            if is_market:
+                price = None
             else:
                 spread = best_ask - best_bid
-                if is_buy_order[i]: price = best_bid + np.random.uniform(0, spread * self.risk_aversion[trader_id])
-                else: price = best_ask - np.random.uniform(0, spread * self.risk_aversion[trader_id])
+                risk_factor = self.risk_aversion[trader_id]
+                if is_buy: price = best_bid + np.random.uniform(0, spread * risk_factor)
+                else: price = best_ask - np.random.uniform(0, spread * risk_factor)
                 price = round(price, 2)
-            if is_buy_order[i]: self.bids.append({'id': trader_id, 'qty': quantity, 'price': price})
-            else: self.asks.append({'id': trader_id, 'qty': quantity, 'price': price})
+            
+            abs_qty = abs(quantity)
+            if is_buy:
+                if self.cash[trader_id] >= abs_qty * (price or best_ask):
+                    self.bids.append({'id': trader_id, 'qty': abs_qty, 'price': price})
+            else: # is sell
+                if self.shares[trader_id] >= abs_qty:
+                    self.asks.append({'id': trader_id, 'qty': abs_qty, 'price': price})
+
 
     def _match_orders(self):
         volume_this_tick = 0
@@ -397,8 +393,9 @@ class SimulatorWindow(QMainWindow):
         reset_btn.clicked.connect(self.on_reset)
         split_btn = QPushButton("Split 2:1")
         rev_split_btn = QPushButton("R-Split 1:2")
-        split_btn.clicked.connect(self.market.perform_split)
-        rev_split_btn.clicked.connect(self.market.perform_reverse_split)
+        # FIX: Use lambda to call with correct factor, ignoring the 'checked' argument from the signal
+        split_btn.clicked.connect(lambda: self.market.perform_split(2))
+        rev_split_btn.clicked.connect(lambda: self.market.perform_reverse_split(2))
         self.trader_counts_label = QLabel("...")
         self.market_cap_label = QLabel("...")
         self.order_book_label = QLabel("...")
