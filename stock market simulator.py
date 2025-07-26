@@ -51,6 +51,7 @@ class Market:
             self.time_horizon = np.array([]) # 0 for pure momentum, 1 for pure value
             self.contrarianism = np.array([]) # -1 for pure momentum, 1 for pure contrarian
             self.base_aggression = np.array([]) # Base desired position size
+            self.risk_aversion = np.array([]) # FIX: Initialize risk_aversion
             return
 
         self.trader_ids = np.arange(self.num_traders)
@@ -63,6 +64,7 @@ class Market:
         self.time_horizon = np.random.rand(self.num_traders)
         self.contrarianism = np.random.uniform(-1, 1, self.num_traders)
         self.base_aggression = np.random.uniform(0.01, 0.1, self.num_traders) # Desired position as % of capital
+        self.risk_aversion = np.random.rand(self.num_traders) # FIX: Initialize risk_aversion
 
         start_idx = 0
         for trader_type, count in trader_counts.items():
@@ -137,6 +139,7 @@ class Market:
         new_time_horizon = np.random.rand(count)
         new_contrarianism = np.random.uniform(-1, 1, count)
         new_base_aggression = np.random.uniform(0.01, 0.1, count)
+        new_risk_aversion = np.random.rand(count) # FIX: Create new risk aversion values
 
         self.cash = np.concatenate([self.cash, new_cash]) if self.num_traders > 0 else new_cash
         self.shares = np.concatenate([self.shares, new_shares]) if self.num_traders > 0 else new_shares
@@ -145,6 +148,7 @@ class Market:
         self.time_horizon = np.concatenate([self.time_horizon, new_time_horizon]) if self.num_traders > 0 else new_time_horizon
         self.contrarianism = np.concatenate([self.contrarianism, new_contrarianism]) if self.num_traders > 0 else new_contrarianism
         self.base_aggression = np.concatenate([self.base_aggression, new_base_aggression]) if self.num_traders > 0 else new_base_aggression
+        self.risk_aversion = np.concatenate([self.risk_aversion, new_risk_aversion]) if self.num_traders > 0 else new_risk_aversion # FIX: Concatenate new values
         
         self.trader_counts[trader_type] += count
         self.num_traders += count
@@ -216,7 +220,6 @@ class Market:
         active_mask = rand_vals[0] < self.order_chance
         if not np.any(active_mask): return
 
-        # --- REVISED AI: Desired Position Model ---
         active_ids = self.trader_ids[active_mask]
         active_cash = self.cash[active_mask]
         active_shares = self.shares[active_mask]
@@ -224,15 +227,12 @@ class Market:
         active_contrarian = self.contrarianism[active_mask]
         active_base_aggression = self.base_aggression[active_mask]
 
-        # Calculate a score based on personality and market signals
         buy_score = (active_time_horizon * value_sentiment) - ((1 - active_time_horizon) * momentum_sentiment * active_contrarian)
         
-        # Calculate desired position based on score and aggression
         total_capital = active_cash + active_shares * self.current_price
         desired_share_alloc = active_base_aggression * (1 + buy_score)
         desired_shares = (total_capital * desired_share_alloc) / (self.current_price + 1e-9)
         
-        # Determine order quantity needed to reach desired position
         order_qty = (desired_shares - active_shares).astype(np.int64)
 
         for i, trader_id in enumerate(active_ids):
@@ -393,7 +393,6 @@ class SimulatorWindow(QMainWindow):
         reset_btn.clicked.connect(self.on_reset)
         split_btn = QPushButton("Split 2:1")
         rev_split_btn = QPushButton("R-Split 1:2")
-        # FIX: Use lambda to call with correct factor, ignoring the 'checked' argument from the signal
         split_btn.clicked.connect(lambda: self.market.perform_split(2))
         rev_split_btn.clicked.connect(lambda: self.market.perform_reverse_split(2))
         self.trader_counts_label = QLabel("...")
