@@ -12,8 +12,9 @@ import pyqtgraph as pg
 # --- Configuration ---
 INITIAL_PRICE = 100.0
 SMA_PERIOD = 20
-SCROLLING_VIEW_TICKS = 100 # Updated as requested
+SCROLLING_VIEW_TICKS = 100
 MINIMUM_PRICE = 1e-6 # A failsafe to prevent price from hitting absolute zero
+INT32_MAX = 2147483647 # Max value for a 32-bit signed integer
 
 PLAYER_INITIAL_CASH = 50000
 
@@ -61,19 +62,20 @@ class Market:
         self.strategy = np.random.choice(STRATEGIES, self.num_traders)
 
         start_idx = 0
-        for type, count in trader_counts.items():
+        # FIX: Changed loop variable from 'type' to 'trader_type' to avoid conflict with built-in 'type'
+        for trader_type, count in trader_counts.items():
             if count == 0: continue
             end_idx = start_idx + count
             mask = slice(start_idx, end_idx)
             
-            if type == 'retail': mean_cap, std_cap = RETAIL_CAPITAL_MEAN, RETAIL_CAPITAL_STD
-            elif type == 'day_trader': mean_cap, std_cap = DAY_TRADER_CAPITAL_MEAN, DAY_TRADER_CAPITAL_STD
+            if trader_type == 'retail': mean_cap, std_cap = RETAIL_CAPITAL_MEAN, RETAIL_CAPITAL_STD
+            elif trader_type == 'day_trader': mean_cap, std_cap = DAY_TRADER_CAPITAL_MEAN, DAY_TRADER_CAPITAL_STD
             else: mean_cap, std_cap = INSTITUTIONAL_CAPITAL_MEAN, INSTITUTIONAL_CAPITAL_STD
             
             self.cash[mask] = np.random.normal(mean_cap, std_cap, count)
             self.shares[mask] = 0
 
-            profile = BEHAVIOR_PROFILES[type]
+            profile = BEHAVIOR_PROFILES[trader_type]
             self.order_chance[mask] = profile['order_chance']
             self.market_order_pct[mask] = profile['market_order_pct']
             self.limit_range[mask] = profile['limit_range']
@@ -127,7 +129,7 @@ class Market:
                 new_shares = share_dist
             self.shares_seeded = True
         
-        profile = BEHAVIOR_PROFILES[type]
+        profile = BEHAVIOR_PROFILES[trader_type]
         new_order_chance = np.full(count, profile['order_chance'])
         new_market_pct = np.full(count, profile['market_order_pct'])
         new_limit_range = np.full(count, profile['limit_range'])
@@ -151,7 +153,6 @@ class Market:
         self.player_shares *= factor
         self.current_price /= factor
         
-        # FIX: Adjust quantities and prices of all pending orders
         for order in self.bids + self.asks:
             order['qty'] *= factor
             if order['price'] is not None:
@@ -167,13 +168,11 @@ class Market:
         self.player_shares //= factor
         self.current_price *= factor
 
-        # FIX: Adjust quantities and prices of all pending orders
         for order in self.bids + self.asks:
             order['qty'] //= factor
             if order['price'] is not None:
                 order['price'] *= factor
         
-        # Remove orders that now have zero quantity
         self.bids = [o for o in self.bids if o['qty'] > 0]
         self.asks = [o for o in self.asks if o['qty'] > 0]
 
@@ -240,11 +239,14 @@ class Market:
         buy_trader_indices = trader_indices[is_buy_order]
         if len(buy_trader_indices) > 0:
             max_buy = (self.cash[buy_trader_indices] * 0.05) / (self.current_price + 1e-9)
-            order_quantities[is_buy_order] = np.random.randint(1, np.maximum(2, max_buy.astype(int)))
+            # FIX: Clip max_buy to prevent integer overflow with very low prices
+            np.clip(max_buy, 0, INT32_MAX, out=max_buy)
+            order_quantities[is_buy_order] = np.random.randint(1, np.maximum(2, max_buy.astype(np.int64)))
         sell_trader_indices = trader_indices[~is_buy_order]
         if len(sell_trader_indices) > 0:
             max_sell = self.shares[sell_trader_indices] * 0.05
-            order_quantities[~is_buy_order] = np.random.randint(1, np.maximum(2, max_sell.astype(int)))
+            np.clip(max_sell, 0, INT32_MAX, out=max_sell)
+            order_quantities[~is_buy_order] = np.random.randint(1, np.maximum(2, max_sell.astype(np.int64)))
         
         is_market_order = rand_vals[2, trader_indices] < self.market_order_pct[trader_indices]
         for i, trader_id in enumerate(trader_indices):
@@ -356,7 +358,7 @@ class SimulatorWindow(QMainWindow):
         player_group = QGroupBox("Player Controls")
         info_group = QGroupBox("Market Controls")
         time_group = QGroupBox("Time Controls")
-        view_group = QGroupBox("Graph View") # Re-added
+        view_group = QGroupBox("Graph View")
 
         # Add Traders Panel
         trader_layout = QFormLayout(trader_group)
@@ -413,7 +415,7 @@ class SimulatorWindow(QMainWindow):
         self.pause_play_btn = QPushButton("Pause")
         self.pause_play_btn.clicked.connect(self.toggle_pause)
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self.speed_slider.setRange(1, 500) # ms interval
+        self.speed_slider.setRange(1, 500)
         self.speed_slider.setValue(50)
         self.speed_slider.setInvertedAppearance(True)
         self.speed_label = QLabel(f"Speed: {self.speed_slider.value()}ms")
