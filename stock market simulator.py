@@ -17,7 +17,6 @@ MINIMUM_PRICE = 1e-6
 INT32_MAX = 2147483647
 MARKET_SHOCK_CHANCE = 0.005
 MARKET_SHOCK_MAGNITUDE = 0.05
-PRICE_SENSITIVITY = 0.0001
 
 PLAYER_INITIAL_CASH = 50000
 
@@ -26,12 +25,11 @@ DAY_TRADER_CAPITAL_MEAN, DAY_TRADER_CAPITAL_STD = 50000, 10000
 INSTITUTIONAL_CAPITAL_MEAN, INSTITUTIONAL_CAPITAL_STD = 10000000, 2000000
 
 BEHAVIOR_PROFILES = {
-    'retail': {'order_chance': 0.1, 'market_order_pct': 0.7},
-    'day_trader': {'order_chance': 0.8, 'market_order_pct': 0.5},
-    'institutional': {'order_chance': 0.25, 'market_order_pct': 0.2}
+    'retail': {'order_chance': 0.1, 'market_order_pct': 0.7, 'limit_order_ttl': 50},
+    'day_trader': {'order_chance': 0.8, 'market_order_pct': 0.5, 'limit_order_ttl': 100},
+    'institutional': {'order_chance': 0.25, 'market_order_pct': 0.2, 'limit_order_ttl': 500}
 }
 
-# --- NEW: Define distinct AI personalities ---
 TRADER_PERSONALITIES = ['value_investor', 'momentum_trader', 'mean_reversion', 'noise_trader']
 
 # --- Market Simulation Engine ---
@@ -53,7 +51,8 @@ class Market:
             self.shares = np.array([], dtype=np.int64)
             self.order_chance = np.array([])
             self.market_order_pct = np.array([])
-            self.personality = np.array([])
+            self.limit_order_ttl = np.array([], dtype=int)
+            self.personality = np.array([], dtype=object)
             return
 
         self.trader_ids = np.arange(self.num_traders)
@@ -61,7 +60,8 @@ class Market:
         self.shares = np.zeros(self.num_traders, dtype=np.int64)
         self.order_chance = np.zeros(self.num_traders)
         self.market_order_pct = np.zeros(self.num_traders)
-        self.personality = np.random.choice(TRADER_PERSONALITIES, self.num_traders)
+        self.limit_order_ttl = np.zeros(self.num_traders, dtype=int)
+        self.personality = np.random.choice(TRADER_PERSONALITIES, self.num_traders, p=[0.25, 0.25, 0.25, 0.25])
 
         start_idx = 0
         for trader_type, count in trader_counts.items():
@@ -79,6 +79,7 @@ class Market:
             profile = BEHAVIOR_PROFILES[trader_type]
             self.order_chance[mask] = profile['order_chance']
             self.market_order_pct[mask] = profile['market_order_pct']
+            self.limit_order_ttl[mask] = profile['limit_order_ttl']
 
     def reset(self, initial_shares):
         print("--- SIMULATION RESET ---")
@@ -133,12 +134,14 @@ class Market:
         profile = BEHAVIOR_PROFILES[trader_type]
         new_order_chance = np.full(count, profile['order_chance'])
         new_market_pct = np.full(count, profile['market_order_pct'])
+        new_ttl = np.full(count, profile['limit_order_ttl'])
         new_personalities = np.random.choice(TRADER_PERSONALITIES, count)
 
         self.cash = np.concatenate([self.cash, new_cash]) if self.num_traders > 0 else new_cash
         self.shares = np.concatenate([self.shares, new_shares]) if self.num_traders > 0 else new_shares
         self.order_chance = np.concatenate([self.order_chance, new_order_chance]) if self.num_traders > 0 else new_order_chance
         self.market_order_pct = np.concatenate([self.market_order_pct, new_market_pct]) if self.num_traders > 0 else new_market_pct
+        self.limit_order_ttl = np.concatenate([self.limit_order_ttl, new_ttl]) if self.num_traders > 0 else new_ttl
         self.personality = np.concatenate([self.personality, new_personalities]) if self.num_traders > 0 else new_personalities
         
         self.trader_counts[trader_type] += count
@@ -214,7 +217,6 @@ class Market:
         
         buy_prob = np.full(len(active_ids), 0.5)
 
-        # Apply personality-based logic
         buy_prob[active_personalities == 'value_investor'] += value_sentiment * 0.5
         buy_prob[active_personalities == 'momentum_trader'] += momentum_sentiment * 0.5
         buy_prob[active_personalities == 'mean_reversion'] += reversion_sentiment * 0.5
@@ -226,19 +228,32 @@ class Market:
         for i, trader_id in enumerate(active_ids):
             is_buy = is_buy_decision[i]
             
-            # Determine order size
             capital = self.cash[trader_id] + self.shares[trader_id] * self.current_price
             order_size_pct = np.random.uniform(0.01, 0.05)
             order_capital = capital * order_size_pct
             quantity = int(order_capital / (self.current_price + 1e-9))
             if quantity == 0: continue
 
+            is_market = np.random.rand() < self.market_order_pct[trader_id]
+            price = None
+            if not is_market:
+                spread = (self.current_price * 1.01) - (self.current_price * 0.99)
+                if is_buy: price = self.current_price * 0.99 + np.random.uniform(0, spread/2)
+                else: price = self.current_price * 1.01 - np.random.uniform(0, spread/2)
+                price = round(price, 2)
+
+            order = {'id': trader_id, 'qty': quantity, 'price': price}
+            if price is not None:
+                order['expires_at'] = self.time + self.limit_order_ttl[trader_id]
+
             if is_buy:
-                if self.cash[trader_id] >= order_capital:
-                    self.bids.append({'id': trader_id, 'qty': quantity, 'price': None}) # Market order
-            else: # is sell
-                if self.shares[trader_id] >= quantity:
-                    self.asks.append({'id': trader_id, 'qty': quantity, 'price': None}) # Market order
+                if self.cash[trader_id] >= order_capital: self.bids.append(order)
+            else:
+                if self.shares[trader_id] >= quantity: self.asks.append(order)
+
+    def _expire_orders(self):
+        self.bids = [o for o in self.bids if 'expires_at' not in o or o['expires_at'] > self.time]
+        self.asks = [o for o in self.asks if 'expires_at' not in o or o['expires_at'] > self.time]
 
     def _match_orders(self):
         volume_this_tick = 0
@@ -298,6 +313,7 @@ class Market:
     def step(self):
         self.time += 1
         self.fundamental_value *= (1 + np.random.normal(0, 0.0005))
+        self._expire_orders()
         self._simulate_market_events()
         self._generate_trader_orders()
         volume = self._match_orders()
@@ -363,8 +379,8 @@ class SimulatorWindow(QMainWindow):
         player_layout = QFormLayout(player_group)
         self.qty_input = QLineEdit("10")
         self.price_input = QLineEdit()
-        self.price_input.setPlaceholderText("Market Order Only")
-        self.price_input.setEnabled(False)
+        self.price_input.setPlaceholderText("Market")
+        self.price_input.setEnabled(True)
         buy_btn = QPushButton("Buy")
         sell_btn = QPushButton("Sell")
         buy_btn.clicked.connect(self.on_buy)
@@ -437,16 +453,18 @@ class SimulatorWindow(QMainWindow):
     def on_buy(self):
         try:
             qty = int(self.qty_input.text())
-            self.market.place_player_order('buy', qty)
+            price = float(self.price_input.text()) if self.price_input.text() else None
+            self.market.place_player_order('buy', qty, price)
         except ValueError:
-            print("Invalid quantity")
+            print("Invalid quantity or price")
 
     def on_sell(self):
         try:
             qty = int(self.qty_input.text())
-            self.market.place_player_order('sell', qty)
+            price = float(self.price_input.text()) if self.price_input.text() else None
+            self.market.place_player_order('sell', qty, price)
         except ValueError:
-            print("Invalid quantity")
+            print("Invalid quantity or price")
             
     def on_reset(self):
         try:
@@ -486,6 +504,7 @@ class SimulatorWindow(QMainWindow):
         player_val = self.market.player_cash + self.market.player_shares * self.market.current_price
         self.player_status_label.setText(f"Cash: ${self.market.player_cash:,.2f}\nShares: {self.market.player_shares}\nValue: ${player_val:,.2f}")
         
+        # FIX: Access trader_counts from the market object
         counts_str = "Trader Counts:\n" + "\n".join([f"  {k}: {v}" for k,v in self.market.trader_counts.items()])
         self.trader_counts_label.setText(counts_str)
         
