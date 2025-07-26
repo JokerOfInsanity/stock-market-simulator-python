@@ -23,17 +23,15 @@ DAY_TRADER_CAPITAL_MEAN, DAY_TRADER_CAPITAL_STD = 50000, 10000
 INSTITUTIONAL_CAPITAL_MEAN, INSTITUTIONAL_CAPITAL_STD = 10000000, 2000000
 
 BEHAVIOR_PROFILES = {
-    'retail': {'order_chance': 0.1, 'market_order_pct': 0.7, 'limit_range': 0.02},
-    'day_trader': {'order_chance': 0.8, 'market_order_pct': 0.5, 'limit_range': 0.01},
-    'institutional': {'order_chance': 0.25, 'market_order_pct': 0.2, 'limit_range': 0.05}
+    'retail': {'order_chance': 0.1, 'market_order_pct': 0.7, 'limit_range_factor': 1.0},
+    'day_trader': {'order_chance': 0.8, 'market_order_pct': 0.5, 'limit_range_factor': 0.5},
+    'institutional': {'order_chance': 0.25, 'market_order_pct': 0.2, 'limit_range_factor': 2.0}
 }
-
-STRATEGIES = ['momentum', 'contrarian', 'noise']
 
 # --- Market Simulation Engine ---
 class Market:
     def __init__(self):
-        self.reset(initial_shares=100000) # Default initial shares
+        self.reset(initial_shares=100000)
 
     @property
     def total_shares(self):
@@ -49,8 +47,10 @@ class Market:
             self.shares = np.array([], dtype=np.int64)
             self.order_chance = np.array([])
             self.market_order_pct = np.array([])
-            self.limit_range = np.array([])
-            self.strategy = np.array([])
+            # --- NEW: Advanced AI Personality Traits ---
+            self.time_horizon = np.array([]) # 0 for pure momentum, 1 for pure value
+            self.contrarianism = np.array([]) # -1 for pure momentum, 1 for pure contrarian
+            self.risk_aversion = np.array([]) # Affects order size and limit range
             return
 
         self.trader_ids = np.arange(self.num_traders)
@@ -58,8 +58,11 @@ class Market:
         self.shares = np.zeros(self.num_traders, dtype=np.int64)
         self.order_chance = np.zeros(self.num_traders)
         self.market_order_pct = np.zeros(self.num_traders)
-        self.limit_range = np.zeros(self.num_traders)
-        self.strategy = np.random.choice(STRATEGIES, self.num_traders)
+        
+        # Initialize personality traits with random values
+        self.time_horizon = np.random.rand(self.num_traders)
+        self.contrarianism = np.random.uniform(-1, 1, self.num_traders)
+        self.risk_aversion = np.random.rand(self.num_traders)
 
         start_idx = 0
         for trader_type, count in trader_counts.items():
@@ -77,14 +80,12 @@ class Market:
             profile = BEHAVIOR_PROFILES[trader_type]
             self.order_chance[mask] = profile['order_chance']
             self.market_order_pct[mask] = profile['market_order_pct']
-            self.limit_range[mask] = profile['limit_range']
-            start_idx = end_idx
 
     def reset(self, initial_shares):
         print("--- SIMULATION RESET ---")
         self.time = 0
         self.current_price = INITIAL_PRICE
-        self.fundamental_value = INITIAL_PRICE # NEW: Add fundamental value
+        self.fundamental_value = INITIAL_PRICE
         self.graph_view_mode = 'Full'
         self.trader_counts = {'retail': 0, 'day_trader': 0, 'institutional': 0}
         
@@ -125,22 +126,26 @@ class Market:
             total_cash = new_cash.sum()
             if total_cash > 0:
                 share_dist = (new_cash / total_cash * self.initial_share_supply).astype(int)
-                share_dist[0] += self.initial_share_supply - share_dist.sum()
+                if len(share_dist) > 0:
+                    share_dist[0] += self.initial_share_supply - share_dist.sum()
                 new_shares = share_dist
             self.shares_seeded = True
         
         profile = BEHAVIOR_PROFILES[trader_type]
         new_order_chance = np.full(count, profile['order_chance'])
         new_market_pct = np.full(count, profile['market_order_pct'])
-        new_limit_range = np.full(count, profile['limit_range'])
-        new_strategies = np.random.choice(STRATEGIES, count)
+        new_time_horizon = np.random.rand(count)
+        new_contrarianism = np.random.uniform(-1, 1, count)
+        new_risk_aversion = np.random.rand(count)
 
-        self.cash = np.concatenate([self.cash, new_cash])
-        self.shares = np.concatenate([self.shares, new_shares])
-        self.order_chance = np.concatenate([self.order_chance, new_order_chance])
-        self.market_order_pct = np.concatenate([self.market_order_pct, new_market_pct])
-        self.limit_range = np.concatenate([self.limit_range, new_limit_range])
-        self.strategy = np.concatenate([self.strategy, new_strategies])
+        # FIX: Handle concatenation when arrays are initially empty
+        self.cash = np.concatenate([self.cash, new_cash]) if self.num_traders > 0 else new_cash
+        self.shares = np.concatenate([self.shares, new_shares]) if self.num_traders > 0 else new_shares
+        self.order_chance = np.concatenate([self.order_chance, new_order_chance]) if self.num_traders > 0 else new_order_chance
+        self.market_order_pct = np.concatenate([self.market_order_pct, new_market_pct]) if self.num_traders > 0 else new_market_pct
+        self.time_horizon = np.concatenate([self.time_horizon, new_time_horizon]) if self.num_traders > 0 else new_time_horizon
+        self.contrarianism = np.concatenate([self.contrarianism, new_contrarianism]) if self.num_traders > 0 else new_contrarianism
+        self.risk_aversion = np.concatenate([self.risk_aversion, new_risk_aversion]) if self.num_traders > 0 else new_risk_aversion
         
         self.trader_counts[trader_type] += count
         self.num_traders += count
@@ -149,14 +154,13 @@ class Market:
 
     def perform_split(self, factor=2):
         print(f"--- STOCK SPLIT ({factor}:1) ---")
-        self.shares *= factor
-        self.player_shares *= factor
+        self.shares = (self.shares * factor).astype(np.int64)
+        self.player_shares = int(self.player_shares * factor)
         self.current_price /= factor
         
         for order in self.bids + self.asks:
-            order['qty'] *= factor
-            if order['price'] is not None:
-                order['price'] /= factor
+            order['qty'] = int(order['qty'] * factor)
+            if order['price'] is not None: order['price'] /= factor
 
         self.price_history = collections.deque([p / factor for p in self.price_history], maxlen=self.price_history.maxlen)
         self.sma_history = collections.deque([s / factor for s in self.sma_history], maxlen=self.sma_history.maxlen)
@@ -164,14 +168,13 @@ class Market:
 
     def perform_reverse_split(self, factor=2):
         print(f"--- REVERSE SPLIT (1:{factor}) ---")
-        self.shares //= factor
-        self.player_shares //= factor
+        self.shares = (self.shares // factor).astype(np.int64)
+        self.player_shares = int(self.player_shares // factor)
         self.current_price *= factor
 
         for order in self.bids + self.asks:
-            order['qty'] //= factor
-            if order['price'] is not None:
-                order['price'] *= factor
+            order['qty'] = int(order['qty'] // factor)
+            if order['price'] is not None: order['price'] *= factor
         
         self.bids = [o for o in self.bids if o['qty'] > 0]
         self.asks = [o for o in self.asks if o['qty'] > 0]
@@ -185,15 +188,11 @@ class Market:
         order = {'id': 'player', 'qty': qty, 'price': price}
         if side == 'buy':
             required_cash = qty * (price if price is not None else self.current_price * 1.05)
-            if self.player_cash >= required_cash:
-                self.bids.append(order)
-            else:
-                print("Player has insufficient cash for this buy order.")
+            if self.player_cash >= required_cash: self.bids.append(order)
+            else: print("Player has insufficient cash for this buy order.")
         elif side == 'sell':
-            if self.player_shares >= qty:
-                self.asks.append(order)
-            else:
-                print("Player has insufficient shares for this sell order.")
+            if self.player_shares >= qty: self.asks.append(order)
+            else: print("Player has insufficient shares for this sell order.")
 
     def _execute_trade(self, buyer_id, seller_id, qty, price):
         cost = qty * price
@@ -210,28 +209,26 @@ class Market:
         best_ask = min(limit_asks) if limit_asks else self.current_price * 1.01
         if best_bid >= best_ask: best_bid = best_ask * 0.99
         
-        # --- REVISED AI LOGIC ---
-        # 1. Get market signals
         sma = self.sma_history[-1]
         momentum_sentiment = (self.current_price - sma) / (sma + 1e-9)
         value_sentiment = (self.fundamental_value - self.current_price) / (self.current_price + 1e-9)
 
-        # 2. Determine who is active
         rand_vals = np.random.rand(3, self.num_traders)
         active_mask = rand_vals[0] < self.order_chance
         active_trader_ids = self.trader_ids[active_mask]
         if len(active_trader_ids) == 0: return
 
-        # 3. Determine buy probability based on strategy and signals
-        active_strategies = self.strategy[active_mask]
+        # --- NEW AI: Calculate buy score based on personality ---
+        active_contrarian = self.contrarianism[active_mask]
+        active_time_horizon = self.time_horizon[active_mask]
         
-        buy_prob = np.full(len(active_trader_ids), 0.5)
-        buy_prob += value_sentiment * 0.2 # All traders are slightly value-oriented
-        buy_prob[active_strategies == 'momentum'] += momentum_sentiment * 0.3
-        buy_prob[active_strategies == 'contrarian'] -= momentum_sentiment * 0.3
+        # Score = (how much I care about value * value signal) - (how much I care about momentum * momentum signal * my contrarian level)
+        buy_score = (active_time_horizon * value_sentiment) - ( (1 - active_time_horizon) * momentum_sentiment * active_contrarian )
+        
+        # Convert score to a probability (0.5 is neutral)
+        buy_prob = 0.5 + (buy_score * 0.5) # Scale score to be between -0.5 and 0.5
         buy_prob = np.clip(buy_prob, 0.01, 0.99)
 
-        # 4. Generate orders based on final decisions
         is_buy_decision = rand_vals[1, active_mask] < buy_prob
         can_buy = self.cash[active_trader_ids] > self.current_price
         can_sell = self.shares[active_trader_ids] > 0
@@ -261,9 +258,8 @@ class Market:
             if is_market_order[i]: price = None
             else:
                 spread = best_ask - best_bid
-                price_nudge = spread * momentum_sentiment * 5
-                if is_buy_order[i]: price = best_bid + np.random.uniform(0, spread / 2) + price_nudge
-                else: price = best_ask - np.random.uniform(0, spread / 2) + price_nudge
+                if is_buy_order[i]: price = best_bid + np.random.uniform(0, spread * self.risk_aversion[trader_id])
+                else: price = best_ask - np.random.uniform(0, spread * self.risk_aversion[trader_id])
                 price = round(price, 2)
             if is_buy_order[i]: self.bids.append({'id': trader_id, 'qty': quantity, 'price': price})
             else: self.asks.append({'id': trader_id, 'qty': quantity, 'price': price})
@@ -319,7 +315,6 @@ class Market:
 
     def step(self):
         self.time += 1
-        # NEW: Fundamental value performs a slow random walk
         self.fundamental_value *= (1 + np.random.normal(0, 0.0005))
         self._generate_trader_orders()
         volume = self._match_orders()
@@ -361,14 +356,12 @@ class SimulatorWindow(QMainWindow):
         controls_layout = QHBoxLayout()
         main_layout.addLayout(controls_layout)
 
-        # --- Control Panels ---
         trader_group = QGroupBox("Add Traders")
         player_group = QGroupBox("Player Controls")
         info_group = QGroupBox("Market Controls")
         time_group = QGroupBox("Time Controls")
         view_group = QGroupBox("Graph View")
 
-        # Add Traders Panel
         trader_layout = QFormLayout(trader_group)
         self.trader_type_radios = {
             'retail': QRadioButton("Retail"),
@@ -384,7 +377,6 @@ class SimulatorWindow(QMainWindow):
         add_trader_btn.clicked.connect(self.on_add_traders)
         trader_layout.addRow(add_trader_btn)
 
-        # Player Panel
         player_layout = QFormLayout(player_group)
         self.qty_input = QLineEdit("10")
         self.price_input = QLineEdit()
@@ -399,7 +391,6 @@ class SimulatorWindow(QMainWindow):
         self.player_status_label = QLabel("...")
         player_layout.addRow(self.player_status_label)
 
-        # Market Info Panel
         info_layout = QFormLayout(info_group)
         self.initial_shares_input = QLineEdit("100000")
         reset_btn = QPushButton("Set & Reset")
@@ -418,7 +409,6 @@ class SimulatorWindow(QMainWindow):
         info_layout.addRow(self.market_cap_label)
         info_layout.addRow(self.order_book_label)
         
-        # Time Controls Panel
         time_layout = QFormLayout(time_group)
         self.pause_play_btn = QPushButton("Pause")
         self.pause_play_btn.clicked.connect(self.toggle_pause)
@@ -432,7 +422,6 @@ class SimulatorWindow(QMainWindow):
         time_layout.addRow("Tick Speed:", self.speed_slider)
         time_layout.addRow(self.speed_label)
 
-        # View Panel
         view_layout = QVBoxLayout(view_group)
         self.view_full_radio = QRadioButton("Full")
         self.view_scroll_radio = QRadioButton("Scrolling")
@@ -448,7 +437,6 @@ class SimulatorWindow(QMainWindow):
         controls_layout.addWidget(time_group)
         controls_layout.addWidget(view_group)
 
-        # --- Timer ---
         self.timer = QTimer()
         self.timer.setInterval(self.speed_slider.value())
         self.timer.timeout.connect(self.update)
